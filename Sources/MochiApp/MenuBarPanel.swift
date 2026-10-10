@@ -2,6 +2,7 @@ import AppKit
 import MochiCore
 import SwiftUI
 
+@MainActor
 enum MochiMenuBarIcon {
     static let image: NSImage = {
         let image = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { _ in
