@@ -11,6 +11,10 @@ jobs:
   release:
     runs-on: macos-15
     environment: release
+    env:
+      HAS_SIGNING: ${{ secrets.CERTIFICATE_P12_BASE64 != '' }}
+      HAS_NOTARY: ${{ secrets.NOTARY_KEY_BASE64 != '' }}
+      HAS_TAP: ${{ secrets.MOCHI_TAP_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -21,6 +25,7 @@ jobs:
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - run: swift test
       - name: Import signing certificate
+        if: env.HAS_SIGNING == 'true'
         env:
           CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
           CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
@@ -32,7 +37,7 @@ jobs:
           security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k temporary "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN"
-      - name: Package, sign and notarize once
+      - name: Package, sign and notarize
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
@@ -40,9 +45,10 @@ jobs:
           NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
           NOTARY_KEY_BASE64: ${{ secrets.NOTARY_KEY_BASE64 }}
         run: |
-          echo "$NOTARY_KEY_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          if [[ "$HAS_NOTARY" == true ]]; then echo "$NOTARY_KEY_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"; fi
           ./scripts/package-release.sh "${GITHUB_REF_NAME#v}"
       - name: Generate and audit cask
+        if: env.HAS_TAP == 'true'
         run: |
           ./scripts/generate-cask.sh dist/release-manifest.json dist/mochi.rb
           brew audit --cask --strict dist/mochi.rb
@@ -50,6 +56,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release create "$GITHUB_REF_NAME" dist/Mochi.dmg dist/Mochi.dmg.sha256 dist/Mochi-*.zip dist/release-manifest.json --verify-tag --generate-notes
       - name: Update first-party tap
+        if: env.HAS_TAP == 'true'
         env:
           GH_TOKEN: ${{ secrets.MOCHI_TAP_TOKEN }}
         run: |
