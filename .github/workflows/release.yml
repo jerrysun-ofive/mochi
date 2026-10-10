@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Validate version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          test -n "$VERSION"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - run: swift test
+      - name: Import signing certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/mochi-signing.keychain-db"
+          echo "$CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p temporary "$KEYCHAIN"
+          security unlock-keychain -p temporary "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temporary "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+      - name: Package, sign and notarize once
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          NOTARY_KEY_BASE64: ${{ secrets.NOTARY_KEY_BASE64 }}
+        run: |
+          echo "$NOTARY_KEY_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          ./scripts/package-release.sh "${GITHUB_REF_NAME#v}"
+      - name: Generate and audit cask
+        run: |
+          ./scripts/generate-cask.sh dist/release-manifest.json dist/mochi.rb
+          brew audit --cask --strict dist/mochi.rb
+      - name: Publish canonical GitHub Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release create "$GITHUB_REF_NAME" dist/Mochi.dmg dist/Mochi.dmg.sha256 dist/Mochi-*.zip dist/release-manifest.json --verify-tag --generate-notes
+      - name: Update first-party tap
+        env:
+          GH_TOKEN: ${{ secrets.MOCHI_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jerrysun-ofive/homebrew-mochi.git" "$RUNNER_TEMP/homebrew-mochi"
+          mkdir -p "$RUNNER_TEMP/homebrew-mochi/Casks"
+          cp dist/mochi.rb "$RUNNER_TEMP/homebrew-mochi/Casks/mochi.rb"
+          git -C "$RUNNER_TEMP/homebrew-mochi" config user.name "Mochi Release Bot"
+          git -C "$RUNNER_TEMP/homebrew-mochi" config user.email "release-bot@users.noreply.github.com"
+          git -C "$RUNNER_TEMP/homebrew-mochi" add Casks/mochi.rb
+          git -C "$RUNNER_TEMP/homebrew-mochi" commit -m "Update Mochi to ${GITHUB_REF_NAME#v}"
+          git -C "$RUNNER_TEMP/homebrew-mochi" push
+      - name: Verify public channels
+        run: |
+          curl -fsSL "https://github.com/jerrysun-ofive/mochi/releases/latest/download/Mochi.dmg.sha256" | grep "$(jq -r .dmgSHA256 dist/release-manifest.json)"
