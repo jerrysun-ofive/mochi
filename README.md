@@ -4,6 +4,8 @@
 
 Mochi is a native, local-first macOS file organizer. Deterministic rules run locally; optional AI can suggest destinations but cannot perform filesystem operations directly.
 
+Website: [trymochi.dev](https://trymochi.dev)
+
 ## Current implementation
 
 - macOS 13 SwiftUI menu-bar and dashboard shell
