@@ -54,6 +54,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var history: [OperationRecord] = []
     @Published var notice: String?
     @Published var isBusy = false
+    @Published private(set) var aiProgress: AIProgress?
     var onFilesSorted: ((Int) -> Void)?
 
     private let folderAccess: FolderAccessController
@@ -319,12 +320,15 @@ final class AppModel: ObservableObject {
         var consulted = 0
         var failure: String?
         var results: [ProposedOperation] = []
+        let consultTotal = min(Self.aiFilesPerScan, pendingFiles.filter { aiSuggestions[AIFileKey($0)] == nil }.count)
+        defer { aiProgress = nil }
         for file in pendingFiles {
             let key = AIFileKey(file)
             if aiSuggestions[key] == nil {
                 guard consulted < Self.aiFilesPerScan, failure == nil else { continue }
                 if orchestrator == nil { orchestrator = makeAIOrchestrator() }
                 guard let orchestrator else { return (results, nil) }
+                aiProgress = AIProgress(current: consulted + 1, total: consultTotal, filename: file.filename)
                 consulted += 1
                 let request = DestinationDecisionRequest(
                     file: extractor.envelope(for: file, allowBoundedText: allowSnippets),
@@ -335,7 +339,11 @@ final class AppModel: ObservableObject {
                 switch outcome {
                 case .existingDestination(let id, _, let explanation):
                     guard let option = references[id] else { aiDeclinedFiles.insert(key); continue }
-                    aiSuggestions[key] = AISuggestion(reference: option.reference, explanation: explanation ?? "Best match among your destinations: \(option.candidate.displayName).")
+                    let reason = explanation ?? "Best match among your destinations: \(option.label)."
+                    aiSuggestions[key] = AISuggestion(
+                        reference: option.reference,
+                        explanation: option.isNewFolder ? "New folder “\(option.reference.relativeSubpath)”: \(reason)" : reason
+                    )
                 case .proposedFolder(let parentID, let name, let explanation):
                     guard let parent = references[parentID]?.reference else { aiDeclinedFiles.insert(key); continue }
                     aiSuggestions[key] = AISuggestion(reference: DestinationReference(grantID: parent.grantID, relativeSubpath: name), explanation: "New folder “\(name)”: \(explanation)")
@@ -360,25 +368,39 @@ final class AppModel: ObservableObject {
         return (results, failure)
     }
 
-    private func aiDestinationOptions(_ destinations: [UUID: URL]) -> [(candidate: DestinationCandidate, reference: DestinationReference)] {
-        var options: [(candidate: DestinationCandidate, reference: DestinationReference)] = []
+    private func aiDestinationOptions(_ destinations: [UUID: URL]) -> [AIDestinationOption] {
+        let catalog = Dictionary(SuggestedFolder.catalog.map { ($0.folder.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        var options: [AIDestinationOption] = []
+        var suggestionGrant: (grant: FolderGrant, existing: Set<String>)?
         for grant in destinationGrants {
             guard let root = destinations[grant.id] else { continue }
-            options.append((
-                DestinationCandidate(id: UUID(), displayName: grant.displayName, userDescription: grant.aiDescription),
-                DestinationReference(grantID: grant.id)
-            ))
+            options.append(.init(label: grant.displayName, description: grant.aiDescription, reference: DestinationReference(grantID: grant.id)))
             let children = (try? FileManager.default.contentsOfDirectory(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
             )) ?? []
+            var existing: Set<String> = []
             for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
                 guard values?.isDirectory == true, values?.isPackage != true else { continue }
-                options.append((
-                    DestinationCandidate(id: UUID(), displayName: "\(grant.displayName)/\(child.lastPathComponent)"),
-                    DestinationReference(grantID: grant.id, relativeSubpath: child.lastPathComponent)
+                let name = child.lastPathComponent
+                existing.insert(name.lowercased())
+                options.append(.init(
+                    label: "\(grant.displayName)/\(name)",
+                    description: catalog[name.lowercased()]?.aiDescription,
+                    reference: DestinationReference(grantID: grant.id, relativeSubpath: name)
+                ))
+            }
+            if suggestionGrant == nil { suggestionGrant = (grant, existing) }
+        }
+        if let (grant, existing) = suggestionGrant {
+            for folder in SuggestedFolder.catalog where !existing.contains(folder.folder.lowercased()) {
+                options.append(.init(
+                    label: "\(grant.displayName)/\(folder.folder)",
+                    description: "\(folder.aiDescription) (suggested folder, created on approval)",
+                    reference: DestinationReference(grantID: grant.id, relativeSubpath: folder.folder),
+                    isNewFolder: true
                 ))
             }
         }
@@ -489,6 +511,26 @@ private struct AIFileKey: Hashable {
         path = file.url.standardizedFileURL.path
         fingerprint = file.fingerprint
     }
+}
+
+private struct AIDestinationOption {
+    let candidate: DestinationCandidate
+    let label: String
+    let reference: DestinationReference
+    let isNewFolder: Bool
+
+    init(label: String, description: String?, reference: DestinationReference, isNewFolder: Bool = false) {
+        candidate = DestinationCandidate(id: UUID(), displayName: label, userDescription: description)
+        self.label = label
+        self.reference = reference
+        self.isNewFolder = isNewFolder
+    }
+}
+
+struct AIProgress: Equatable {
+    let current: Int
+    let total: Int
+    let filename: String
 }
 
 struct AISuggestion {

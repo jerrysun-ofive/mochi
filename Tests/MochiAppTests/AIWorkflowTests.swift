@@ -48,6 +48,40 @@ final class AIWorkflowTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.destination.appendingPathComponent("Taxes/2025-tax-return.pdf").path))
     }
 
+    func testAICanChooseSuggestedFolderThatDoesNotExistYet() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try Data("fixture".utf8).write(to: fixture.source.appendingPathComponent("origin-energy-sept.pdf"))
+
+        let jev = ClosureDecisionProvider { request in
+            let bills = try XCTUnwrap(request.candidates.first { $0.displayName.hasSuffix("/Utility Bills") })
+            XCTAssertTrue(bills.userDescription?.contains("Electricity") == true)
+            XCTAssertTrue(request.candidates.contains { $0.displayName.hasSuffix("/Work") })
+            return .fixture(selectedID: bills.id.uuidString, confidence: 0.9, probabilities: [bills.id.uuidString: 0.9, "other": 0.1])
+        }
+        let model = await fixture.model(orchestrator: HybridDecisionOrchestrator(decisionProvider: jev, generativeProvider: FixedGenerativeProvider(result: .noRecommendation(explanation: "unused"))))
+
+        await model.runNow()
+        let proposal = try XCTUnwrap(model.proposals.first)
+        XCTAssertEqual(proposal.destinationURL?.path, fixture.destination.appendingPathComponent("Utility Bills/origin-energy-sept.pdf").path)
+        XCTAssertTrue(proposal.aiExplanation?.hasPrefix("New folder “Utility Bills”") == true)
+        XCTAssertNil(model.aiProgress)
+        await model.approve(proposal)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.destination.appendingPathComponent("Utility Bills/origin-energy-sept.pdf").path))
+    }
+
+    func testKeywordQuickRuleMatchesFilename() throws {
+        let template = try XCTUnwrap(QuickRuleTemplate.builtIns.first { $0.id == "invoices" })
+        let rule = template.makeRule(sourceGrantID: nil, destinationGrantID: UUID(), priority: 0)
+        XCTAssertTrue(RuleValidator().validate(rule).isEmpty)
+        let engine = RuleEngine()
+        let invoice = FileMetadata(url: URL(fileURLWithPath: "/tmp/Invoice-0042.pdf"), filename: "Invoice-0042.pdf", fileExtension: "pdf", size: 1)
+        let other = FileMetadata(url: URL(fileURLWithPath: "/tmp/notes.pdf"), filename: "notes.pdf", fileExtension: "pdf", size: 1)
+        XCTAssertTrue(engine.evaluate(file: invoice, rule: rule).matched)
+        XCTAssertFalse(engine.evaluate(file: other, rule: rule).matched)
+        XCTAssertNil(QuickRuleTemplate.builtIns.first { $0.id == "work" }, "AI-only folders have no Quick Rule")
+    }
+
     func testRejectedKeyIsReportedAndNothingIsProposed() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanUp() }

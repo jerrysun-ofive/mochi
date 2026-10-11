@@ -12,6 +12,12 @@ struct DashboardView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
         } detail: {
             detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay {
+                    if let progress = model.aiProgress {
+                        AISortingOverlay(progress: progress).transition(.opacity)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: model.aiProgress == nil)
         }
         .sheet(item: $model.ruleEditor) { presentation in
             RuleEditorView(existing: presentation.rule, sourceGrants: model.sourceGrants, destinationGrants: model.destinationGrants) { rule in
@@ -840,8 +846,7 @@ private struct ProposalCard: View {
                         Label("Rule: \(ruleName)", systemImage: "list.bullet.rectangle")
                             .font(.caption).foregroundStyle(.secondary)
                     } else if proposal.aiExplanation != nil {
-                        Label("AI suggestion", systemImage: "sparkles")
-                            .font(.caption).foregroundStyle(.secondary)
+                        AISuggestionBadge()
                     }
                 }
                 Spacer()
@@ -872,6 +877,17 @@ private struct ProposalCard: View {
         .padding(16)
         .cardStyle()
         .accessibilityElement(children: .contain)
+    }
+}
+
+struct AISuggestionBadge: View {
+    var body: some View {
+        Label("AI suggestion", systemImage: "sparkles")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(Color.green)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.green.opacity(0.14)))
     }
 }
 

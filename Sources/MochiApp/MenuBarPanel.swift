@@ -104,7 +104,11 @@ struct MenuBarPanel: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.proposals.isEmpty {
+        if let progress = model.aiProgress {
+            MochiThinkingView(progress: progress, compact: true)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+        } else if model.proposals.isEmpty {
             emptyState
         } else {
             reviewQueue
@@ -273,10 +277,18 @@ private struct MenuBarProposalRow: View {
                 .frame(width: 30, height: 30)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(proposal.source.filename)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                HStack(spacing: 6) {
+                    Text(proposal.source.filename)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if proposal.aiExplanation != nil {
+                        Image(systemName: "sparkles")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.green)
+                            .help("AI suggestion")
+                    }
+                }
                 MoveRoute(from: proposal.source.url.deletingLastPathComponent(), to: proposal.destinationURL?.deletingLastPathComponent(), compact: true)
             }
             .help(proposal.destinationURL.map { "\(proposal.source.url.path) → \($0.path)" } ?? proposal.source.url.path)
