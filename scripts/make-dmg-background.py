@@ -9,9 +9,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-WIDTH, HEIGHT = 660, 420
-APP_CENTER = (170, 220)
-APPLICATIONS_CENTER = (490, 220)
+WIDTH, HEIGHT = 660, 450
+APP_CENTER = (170, 196)
+APPLICATIONS_CENTER = (490, 196)
 SUPERSAMPLE = 4
 
 INK = (29, 29, 31)
@@ -105,6 +105,24 @@ def centered_text(draw, y, text, f, color):
     draw.text(((s(WIDTH) - (right - left)) / 2 - left, s(y)), text, font=f, fill=color)
 
 
+def gatekeeper_note(canvas):
+    # Mochi ships without an Apple Developer ID, so Gatekeeper blocks the first launch.
+    left, top, right, bottom = 40, 300, WIDTH - 40, 400
+    shadow = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle((s(left), s(top + 2), s(right), s(bottom + 2)), radius=s(14), fill=(0, 0, 0, 22))
+    canvas.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(s(6))))
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((s(left), s(top), s(right), s(bottom)), radius=s(14), fill=(255, 255, 255, 235), outline=CORAL + (90,), width=s(1))
+    centered_text(draw, top + 12, "Heads up: macOS is about to be a little dramatic", font(13, 680), INK + (255,))
+    lines = [
+        "Mochi isn’t signed with Apple yet, so it’ll say Mochi “can’t be verified.” Rude.",
+        "Open Mochi once, then go to System Settings → Privacy & Security → Open Anyway.",
+        "It’s free, it’s open source, and there’s no malware. Pinky promise.",
+    ]
+    for index, line in enumerate(lines):
+        centered_text(draw, top + 36 + index * 18, line, font(11, 430), MUTED + (255,))
+
+
 def render():
     size = (s(WIDTH), s(HEIGHT))
     canvas = vertical_gradient(size, TOP, BOTTOM).convert("RGBA")
@@ -116,6 +134,7 @@ def render():
     draw = ImageDraw.Draw(canvas)
     centered_text(draw, 40, "Install Mochi", font(24, 680), INK + (255,))
     centered_text(draw, 76, "Drag Mochi into your Applications folder.", font(13, 420), MUTED + (255,))
+    gatekeeper_note(canvas)
     return canvas.convert("RGB")
 
 

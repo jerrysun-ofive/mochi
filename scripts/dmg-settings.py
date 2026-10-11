@@ -15,7 +15,8 @@ hide_extensions = [app_name]
 icon = os.path.join(root, "Packaging", "AppIcon.icns")
 
 background = os.path.join(root, "Packaging", "dmg-background.png")
-window_rect = ((200, 140), (660, 420))
+# The window height includes the title bar and, when the user has it enabled, Finder's path bar.
+window_rect = ((200, 140), (660, 480))
 default_view = "icon-view"
 show_status_bar = False
 show_tab_view = False
@@ -30,6 +31,6 @@ icon_size = 128
 text_size = 13
 label_pos = "bottom"
 icon_locations = {
-    app_name: (170, 220),
-    "Applications": (490, 220),
+    app_name: (170, 196),
+    "Applications": (490, 196),
 }
