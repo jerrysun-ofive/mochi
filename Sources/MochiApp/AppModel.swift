@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
     private let rulesURL: URL
     private var folderMonitor: FSEventsFolderMonitor?
     private var monitoredScanTask: Task<Void, Never>?
+    private var monitoredRescanPending = false
     private let makeAIOrchestrator: () -> HybridDecisionOrchestrator?
     private var aiSuggestions: [AIFileKey: AISuggestion] = [:]
     private var aiDeclinedFiles: Set<AIFileKey> = []
@@ -242,7 +243,13 @@ final class AppModel: ObservableObject {
             }
         }
         isBusy = true
-        defer { isBusy = false }
+        defer {
+            isBusy = false
+            if monitoredRescanPending {
+                monitoredRescanPending = false
+                scheduleMonitoredScan()
+            }
+        }
         do {
             var resolvedDestinations: [UUID: URL] = [:]
             for grant in destinationGrants {
@@ -336,6 +343,7 @@ final class AppModel: ObservableObject {
                     candidateSetHash: candidateSetHash
                 )
                 let outcome = await orchestrator.decide(request: request, authorizedParentIDs: parentIDs, policy: policy, allowProviderFailover: allowFailover)
+                if Task.isCancelled { return (results, nil) }
                 switch outcome {
                 case .existingDestination(let id, _, let explanation):
                     guard let option = references[id] else { aiDeclinedFiles.insert(key); continue }
@@ -482,8 +490,13 @@ final class AppModel: ObservableObject {
         monitoredScanTask?.cancel()
         monitoredScanTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            await self?.processMonitoredChangesNow()
+            guard !Task.isCancelled, let self else { return }
+            guard !self.isBusy else {
+                self.monitoredRescanPending = true
+                return
+            }
+            // Detached from the debounce task so later folder events cannot cancel in-flight AI requests.
+            Task { await self.processMonitoredChangesNow() }
         }
     }
 
