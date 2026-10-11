@@ -35,6 +35,35 @@ protocol AICredentialStoring {
 
 extension KeychainCredentialStore: AICredentialStoring {}
 
+/// Each Keychain read of an item can trigger a macOS password prompt, so every
+/// secret is read at most once per launch and then served from memory.
+final class CachedCredentialStore: AICredentialStoring, @unchecked Sendable {
+    static let shared = CachedCredentialStore(base: KeychainCredentialStore())
+
+    private let base: any AICredentialStoring
+    private let lock = NSLock()
+    private var cache: [String: String?] = [:]
+
+    init(base: any AICredentialStoring) { self.base = base }
+
+    func save(_ secret: String, account: String) throws {
+        try base.save(secret, account: account)
+        lock.withLock { cache[account] = .some(secret) }
+    }
+
+    func load(account: String) throws -> String? {
+        if let cached = lock.withLock({ cache[account] }) { return cached }
+        let value = try base.load(account: account)
+        lock.withLock { cache[account] = .some(value) }
+        return value
+    }
+
+    func remove(account: String) throws {
+        try base.remove(account: account)
+        lock.withLock { cache[account] = .some(nil) }
+    }
+}
+
 enum BYOKConfiguration {
     static let jevAccount = "typesafe-jev-api-key"
 
@@ -43,7 +72,7 @@ enum BYOKConfiguration {
     /// Returns nil unless a Jev key and a usable generative provider are both saved.
     static func makeOrchestrator(
         defaults: UserDefaults = .standard,
-        credentials: any AICredentialStoring = KeychainCredentialStore()
+        credentials: any AICredentialStoring = CachedCredentialStore.shared
     ) -> HybridDecisionOrchestrator? {
         guard let jevKey = try? credentials.load(account: jevAccount), !jevKey.isEmpty else { return nil }
         let provider = defaults.string(forKey: "ai.generativeProvider").flatMap(GenerativeProviderChoice.init(rawValue:)) ?? .openAI
@@ -82,7 +111,7 @@ final class AISettingsModel: ObservableObject {
     private let credentials: any AICredentialStoring
     private static let jevAccount = BYOKConfiguration.jevAccount
 
-    init(defaults: UserDefaults = .standard, credentials: any AICredentialStoring = KeychainCredentialStore()) {
+    init(defaults: UserDefaults = .standard, credentials: any AICredentialStoring = CachedCredentialStore.shared) {
         self.defaults = defaults
         self.credentials = credentials
         let savedProvider = defaults.string(forKey: "ai.generativeProvider").flatMap(GenerativeProviderChoice.init(rawValue:)) ?? .openAI

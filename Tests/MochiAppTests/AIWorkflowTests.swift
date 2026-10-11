@@ -97,6 +97,24 @@ final class AIWorkflowTests: XCTestCase {
         credentials.values[BYOKConfiguration.providerAccount(for: .deepSeek)] = "deepseek"
         XCTAssertNotNil(BYOKConfiguration.makeOrchestrator(defaults: defaults, credentials: credentials))
     }
+
+    func testCachedCredentialsReadEachKeychainItemOnce() throws {
+        let base = MemoryCredentials()
+        base.values["jev"] = "secret"
+        let cached = CachedCredentialStore(base: base)
+
+        for _ in 0..<5 {
+            XCTAssertEqual(try cached.load(account: "jev"), "secret")
+            XCTAssertNil(try cached.load(account: "missing"))
+        }
+        XCTAssertEqual(base.loadCount, 2)
+
+        try cached.save("replaced", account: "jev")
+        XCTAssertEqual(try cached.load(account: "jev"), "replaced")
+        try cached.remove(account: "jev")
+        XCTAssertNil(try cached.load(account: "jev"))
+        XCTAssertEqual(base.loadCount, 2)
+    }
 }
 
 private struct Fixture {
@@ -151,7 +169,8 @@ private struct FixedGenerativeProvider: GenerativeAIProvider {
 
 private final class MemoryCredentials: AICredentialStoring {
     var values: [String: String] = [:]
+    var loadCount = 0
     func save(_ secret: String, account: String) throws { values[account] = secret }
-    func load(account: String) throws -> String? { values[account] }
+    func load(account: String) throws -> String? { loadCount += 1; return values[account] }
     func remove(account: String) throws { values.removeValue(forKey: account) }
 }
