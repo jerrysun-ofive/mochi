@@ -105,6 +105,21 @@ final class AccountModelTests: XCTestCase {
         XCTAssertNil(model.statusMessage)
     }
 
+    func testMochiProEntitlementUsesAuthenticatedEdgeFunction() async throws {
+        let server = FakeSupabase()
+        let client = SupabaseAuthClient(configuration: .mochi, transport: server.handle)
+        let session = AccountSession(
+            accessToken: "access-token", refreshToken: "refresh-token",
+            expiresAt: Date().addingTimeInterval(3_600),
+            user: .init(id: "user-1", email: "fan@example.com", fullName: "Mochi Fan", avatarURL: nil)
+        )
+        let entitlement = try await client.mochiProEntitlement(session: session)
+        XCTAssertTrue(entitlement.isActive)
+        XCTAssertEqual(entitlement.plan, "pro")
+        XCTAssertEqual(entitlement.requestsUsed, 12)
+        XCTAssertEqual(entitlement.requestLimit, 1_000)
+    }
+
     private static func isolatedDefaults() -> UserDefaults {
         UserDefaults(suiteName: "MochiAccountTests.\(UUID().uuidString)")!
     }
@@ -129,8 +144,10 @@ private final class FakeSupabase: @unchecked Sendable {
     var loggedOut: Bool { lock.withLock { state.loggedOut } }
 
     @Sendable func handle(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        XCTAssertEqual(request.value(forHTTPHeaderField: "apikey"), SupabaseConfiguration.mochi.publishableKey)
         let url = try XCTUnwrap(request.url)
+        if url.host == SupabaseConfiguration.mochi.url.host {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "apikey"), SupabaseConfiguration.mochi.publishableKey)
+        }
         let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
         let json: Any
         switch (request.httpMethod, url.path) {
@@ -156,6 +173,14 @@ private final class FakeSupabase: @unchecked Sendable {
         case ("POST", "/auth/v1/logout"):
             lock.withLock { state.loggedOut = true }
             return (Data(), HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)!)
+        case ("GET", "/api/v1/billing/status"):
+            XCTAssertEqual(url.host, "www.trymochi.dev")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer access-token")
+            json = [
+                "plan": "pro", "status": "active", "isActive": true,
+                "currentPeriodEnd": NSNull(), "cancelAtPeriodEnd": false,
+                "requestsUsed": 12, "requestLimit": 1_000,
+            ]
         default:
             XCTFail("Unexpected request \(request.httpMethod ?? "") \(url)")
             json = [:]

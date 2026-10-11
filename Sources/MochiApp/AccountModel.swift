@@ -19,6 +19,14 @@ struct SupabaseConfiguration: Sendable {
     var callbackScheme: String { redirectURL.scheme ?? "mochi" }
 }
 
+struct MochiProGatewayConfiguration: Sendable {
+    let baseURL: URL
+
+    static let production = MochiProGatewayConfiguration(
+        baseURL: URL(string: "https://www.trymochi.dev/api")!
+    )
+}
+
 struct AccountUser: Codable, Equatable, Sendable {
     var id: String
     var email: String?
@@ -45,6 +53,23 @@ struct AccountProfile: Codable, Equatable, Sendable {
         case avatarURL = "avatar_url"
     }
 }
+
+struct MochiProEntitlement: Codable, Equatable, Sendable {
+    let plan: String
+    let status: String
+    let isActive: Bool
+    let currentPeriodEnd: String?
+    let cancelAtPeriodEnd: Bool
+    let requestsUsed: Int
+    let requestLimit: Int
+
+    static let free = MochiProEntitlement(
+        plan: "free", status: "inactive", isActive: false, currentPeriodEnd: nil,
+        cancelAtPeriodEnd: false, requestsUsed: 0, requestLimit: 0
+    )
+}
+
+private struct BillingLink: Decodable { let url: URL }
 
 enum AccountError: LocalizedError, Equatable {
     case cancelled
@@ -96,10 +121,16 @@ struct SupabaseAuthClient: Sendable {
     typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     let configuration: SupabaseConfiguration
+    let proConfiguration: MochiProGatewayConfiguration
     private let transport: Transport
 
-    init(configuration: SupabaseConfiguration = .mochi, transport: @escaping Transport = { try await URLSession.shared.data(for: $0) }) {
+    init(
+        configuration: SupabaseConfiguration = .mochi,
+        proConfiguration: MochiProGatewayConfiguration = .production,
+        transport: @escaping Transport = { try await URLSession.shared.data(for: $0) }
+    ) {
         self.configuration = configuration
+        self.proConfiguration = proConfiguration
         self.transport = transport
     }
 
@@ -169,7 +200,40 @@ struct SupabaseAuthClient: Sendable {
         try await send(path: "rest/v1/rpc/record_files_sorted", method: "POST", body: ["p_count": count], accessToken: session.accessToken)
     }
 
+    func mochiProEntitlement(session: AccountSession) async throws -> MochiProEntitlement {
+        try await sendPro(path: "v1/billing/status", accessToken: session.accessToken)
+    }
+
+    func createMochiProCheckout(session: AccountSession) async throws -> URL {
+        let link: BillingLink = try await sendPro(
+            path: "v1/billing/checkout", method: "POST", accessToken: session.accessToken
+        )
+        return link.url
+    }
+
+    func createMochiProPortal(session: AccountSession) async throws -> URL {
+        let link: BillingLink = try await sendPro(
+            path: "v1/billing/portal", method: "POST", accessToken: session.accessToken
+        )
+        return link.url
+    }
+
     private func endpoint(_ path: String) -> URL { configuration.url.appendingPathComponent(path) }
+
+    private func sendPro<Response: Decodable>(path: String, method: String = "GET", accessToken: String) async throws -> Response {
+        var request = URLRequest(url: proConfiguration.baseURL.appendingPathComponent(path))
+        request.httpMethod = method
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await transport(request)
+        guard let http = response as? HTTPURLResponse else { throw AccountError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = (try? JSONDecoder().decode(ServerError.self, from: data))?.message
+            throw AccountError.server(status: http.statusCode, message: message ?? "The Mochi Pro service returned status \(http.statusCode).")
+        }
+        do { return try JSONDecoder().decode(Response.self, from: data) }
+        catch { throw AccountError.invalidResponse }
+    }
 
     private func send<Response: Decodable>(
         path: String,
@@ -207,10 +271,11 @@ private struct EmptyResponse: Decodable {}
 
 private struct ServerError: Decodable {
     let message: String?
-    enum CodingKeys: String, CodingKey { case errorDescription = "error_description", msg, message }
+    enum CodingKeys: String, CodingKey { case errorDescription = "error_description", error, msg, message }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         message = try container.decodeIfPresent(String.self, forKey: .errorDescription)
+            ?? container.decodeIfPresent(String.self, forKey: .error)
             ?? container.decodeIfPresent(String.self, forKey: .msg)
             ?? container.decodeIfPresent(String.self, forKey: .message)
     }
@@ -304,6 +369,7 @@ final class AccountModel: ObservableObject {
     @Published private(set) var isWorking = false
     @Published private(set) var statusMessage: String?
     @Published private(set) var syncedFilesSorted: Int?
+    @Published private(set) var proEntitlement: MochiProEntitlement = .free
     @Published private(set) var pendingFilesSorted: Int {
         didSet { defaults.set(pendingFilesSorted, forKey: Self.pendingFilesSortedKey) }
     }
@@ -337,6 +403,7 @@ final class AccountModel: ObservableObject {
     }
 
     var isSignedIn: Bool { session != nil }
+    var isPro: Bool { proEntitlement.isActive }
     var totalFilesSorted: Int { (syncedFilesSorted ?? 0) + pendingFilesSorted }
     var email: String? { profile?.email ?? session?.user.email }
     var avatarURL: URL? { profile?.avatarURL ?? session?.user.avatarURL }
@@ -370,6 +437,7 @@ final class AccountModel: ObservableObject {
             profile = try? await client.profile(for: session!)
             displayNameEntry = profile?.fullName ?? session?.user.fullName ?? ""
             statusMessage = "Signed in as \(email ?? displayName)."
+            await refreshProEntitlement(silently: true)
             await syncUsage()
         } catch AccountError.cancelled {
             statusMessage = nil
@@ -383,6 +451,7 @@ final class AccountModel: ObservableObject {
             let current = try await validSession()
             profile = try await client.profile(for: current)
             if let name = profile?.fullName { displayNameEntry = name }
+            await refreshProEntitlement(silently: true)
             await syncUsage()
         } catch AccountError.server(let status, _) where status == 400 || status == 401 {
             clearSession()
@@ -434,6 +503,60 @@ final class AccountModel: ObservableObject {
         statusMessage = "Signed out."
     }
 
+    func upgradeToPro() async {
+        await openBillingPage(kind: .checkout)
+    }
+
+    func manageSubscription() async {
+        await openBillingPage(kind: .portal)
+    }
+
+    func refreshPlan() async {
+        await refreshProEntitlement(silently: false)
+    }
+
+    func mochiProProvider() async throws -> MochiProProvider {
+        guard isPro else { throw AccountError.server(status: 402, message: "An active Mochi Pro subscription is required.") }
+        let current = try await validSession()
+        return MochiProProvider(
+            baseURL: client.proConfiguration.baseURL,
+            accessToken: current.accessToken,
+            registryVersion: "2026-10-11"
+        )
+    }
+
+    private enum BillingPage { case checkout, portal }
+
+    private func openBillingPage(kind: BillingPage) async {
+        guard !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let current = try await validSession()
+            let url = switch kind {
+            case .checkout: try await client.createMochiProCheckout(session: current)
+            case .portal: try await client.createMochiProPortal(session: current)
+            }
+            guard NSWorkspace.shared.open(url) else { throw AccountError.browserUnavailable }
+            switch kind {
+            case .checkout: statusMessage = "Finish checkout in your browser, then refresh your plan."
+            case .portal: statusMessage = "Mochi Pro billing opened in your browser."
+            }
+        } catch {
+            statusMessage = "Could not open Mochi Pro billing: \(error.localizedDescription)"
+        }
+    }
+
+    private func refreshProEntitlement(silently: Bool) async {
+        guard session != nil else { proEntitlement = .free; return }
+        do {
+            proEntitlement = try await client.mochiProEntitlement(session: try await validSession())
+            if !silently { statusMessage = isPro ? "Mochi Pro is active." : "No active Mochi Pro subscription was found." }
+        } catch {
+            if !silently { statusMessage = "Could not refresh Mochi Pro: \(error.localizedDescription)" }
+        }
+    }
+
     private func validSession() async throws -> AccountSession {
         guard let session else { throw AccountError.server(status: 401, message: "Not signed in.") }
         guard session.expiresAt.timeIntervalSinceNow < 60 else { return session }
@@ -452,6 +575,7 @@ final class AccountModel: ObservableObject {
         try? credentials.remove(account: Self.sessionAccount)
         session = nil
         profile = nil
+        proEntitlement = .free
         syncedFilesSorted = nil
         displayNameEntry = ""
     }

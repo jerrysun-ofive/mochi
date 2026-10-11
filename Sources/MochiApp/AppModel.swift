@@ -1,5 +1,7 @@
 import AppKit
+import CryptoKit
 import Foundation
+import MochiAI
 import MochiCore
 
 enum AppSection: String, CaseIterable, Identifiable {
@@ -60,8 +62,18 @@ final class AppModel: ObservableObject {
     private let rulesURL: URL
     private var folderMonitor: FSEventsFolderMonitor?
     private var monitoredScanTask: Task<Void, Never>?
+    private let makeAIOrchestrator: () -> HybridDecisionOrchestrator?
+    private var aiSuggestions: [AIFileKey: AISuggestion] = [:]
+    private var aiDeclinedFiles: Set<AIFileKey> = []
 
-    init(supportRoot: URL? = nil, securityScopedBookmarks: Bool? = nil) {
+    static let aiFilesPerScan = 10
+
+    init(
+        supportRoot: URL? = nil,
+        securityScopedBookmarks: Bool? = nil,
+        aiOrchestrator: @escaping () -> HybridDecisionOrchestrator? = { BYOKConfiguration.makeOrchestrator() }
+    ) {
+        makeAIOrchestrator = aiOrchestrator
         monitoringEnabled = UserDefaults.standard.object(forKey: "monitoringEnabled") as? Bool ?? true
         let dataRoot = supportRoot ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Mochi", isDirectory: true)
@@ -219,10 +231,14 @@ final class AppModel: ObservableObject {
             selectedSection = .folders
             return
         }
-        guard rules.contains(where: \.isEnabled) else {
-            notice = "Create and enable at least one rule before running Mochi."
-            selectedSection = .rules
-            return
+        var orchestrator: HybridDecisionOrchestrator?
+        if !rules.contains(where: \.isEnabled) {
+            orchestrator = makeAIOrchestrator()
+            guard orchestrator != nil else {
+                notice = "Create and enable at least one rule before running Mochi."
+                selectedSection = .rules
+                return
+            }
         }
         isBusy = true
         defer { isBusy = false }
@@ -236,6 +252,7 @@ final class AppModel: ObservableObject {
             let engine = RuleEngine()
             let extractor = MetadataExtractor()
             var pending: [ProposedOperation] = []
+            var unmatched: [FileMetadata] = []
             for grant in sourceGrants where grant.isMonitoringEnabled {
                 guard let root = try await folderAccess.resolve(id: grant.id) else { continue }
                 let urls = try FileManager.default.contentsOfDirectory(
@@ -244,29 +261,128 @@ final class AppModel: ObservableObject {
                     options: [.skipsHiddenFiles, .skipsPackageDescendants]
                 )
                 for url in urls where !ReadinessProbe.temporaryExtensions.contains(url.pathExtension.lowercased()) {
-                    guard let metadata = try? extractor.metadata(for: url),
-                          let match = engine.firstMatch(file: metadata, sourceGrantID: grant.id, rules: rules) else { continue }
+                    guard let metadata = try? extractor.metadata(for: url) else { continue }
+                    guard let match = engine.firstMatch(file: metadata, sourceGrantID: grant.id, rules: rules) else {
+                        if metadata.isRegularFile, !metadata.isSymbolicLink, !metadata.isHidden { unmatched.append(metadata) }
+                        continue
+                    }
                     if case .move = match.rule.action.disposition {
                         let proposal = planner.plan(file: metadata, evaluation: match)
                         if proposal.destinationURL != nil { pending.append(proposal) }
                     }
                 }
             }
+            let ai = await aiProposals(for: unmatched, destinations: destinationSnapshot, planner: planner, orchestrator: orchestrator)
+            pending.append(contentsOf: ai.proposals)
+            let aiNote = ai.failure.map { " AI suggestions are unavailable because \($0)." } ?? ""
             if automatic {
                 let existingSources = Set(proposals.map { $0.source.url.standardizedFileURL })
                 let additions = pending.filter { !existingSources.contains($0.source.url.standardizedFileURL) }
                 proposals.append(contentsOf: additions)
                 if !additions.isEmpty {
-                    notice = "Mochi found \(additions.count) new operation\(additions.count == 1 ? "" : "s") ready for review."
+                    notice = "Mochi found \(additions.count) new operation\(additions.count == 1 ? "" : "s") ready for review.\(aiNote)"
+                } else if !aiNote.isEmpty {
+                    notice = aiNote.trimmingCharacters(in: .whitespaces)
                 }
             } else {
                 proposals = pending
                 if openReview { selectedSection = .review }
-                notice = pending.isEmpty ? "No files matched your enabled rules." : "Found \(pending.count) operation\(pending.count == 1 ? "" : "s") ready for review."
+                notice = (pending.isEmpty ? "No files matched your enabled rules." : "Found \(pending.count) operation\(pending.count == 1 ? "" : "s") ready for review.") + aiNote
             }
         } catch {
             notice = "Organize Now failed: \(error.localizedDescription)"
         }
+    }
+
+    private func aiProposals(
+        for files: [FileMetadata],
+        destinations: [UUID: URL],
+        planner: OperationPlanner,
+        orchestrator preloaded: HybridDecisionOrchestrator?
+    ) async -> (proposals: [ProposedOperation], failure: String?) {
+        let pendingFiles = files.filter { !aiDeclinedFiles.contains(AIFileKey($0)) }
+        guard !pendingFiles.isEmpty, !destinations.isEmpty else { return ([], nil) }
+        let options = aiDestinationOptions(destinations)
+        guard !options.isEmpty else { return ([], nil) }
+        let references = Dictionary(uniqueKeysWithValues: options.map { ($0.candidate.id, $0) })
+        let candidates = options.map(\.candidate)
+        let parentIDs = Set(options.filter { $0.reference.relativeSubpath.isEmpty }.map(\.candidate.id))
+        let candidateSetHash = SHA256.hash(data: Data(options.map { "\($0.reference.grantID)/\($0.reference.relativeSubpath)" }.joined(separator: "\n").utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        let defaults = UserDefaults.standard
+        let allowSnippets = defaults.bool(forKey: "allowTextSnippets")
+        let allowFailover = defaults.bool(forKey: "allowProviderFailover")
+        let policy = AIAutomationPolicy(minimumConfidence: 0.6, minimumMargin: 0.2)
+        let extractor = LocalContentExtractor()
+
+        var orchestrator = preloaded
+        var consulted = 0
+        var failure: String?
+        var results: [ProposedOperation] = []
+        for file in pendingFiles {
+            let key = AIFileKey(file)
+            if aiSuggestions[key] == nil {
+                guard consulted < Self.aiFilesPerScan, failure == nil else { continue }
+                if orchestrator == nil { orchestrator = makeAIOrchestrator() }
+                guard let orchestrator else { return (results, nil) }
+                consulted += 1
+                let request = DestinationDecisionRequest(
+                    file: extractor.envelope(for: file, allowBoundedText: allowSnippets),
+                    candidates: candidates,
+                    candidateSetHash: candidateSetHash
+                )
+                let outcome = await orchestrator.decide(request: request, authorizedParentIDs: parentIDs, policy: policy, allowProviderFailover: allowFailover)
+                switch outcome {
+                case .existingDestination(let id, _, let explanation):
+                    guard let option = references[id] else { aiDeclinedFiles.insert(key); continue }
+                    aiSuggestions[key] = AISuggestion(reference: option.reference, explanation: explanation ?? "Best match among your destinations: \(option.candidate.displayName).")
+                case .proposedFolder(let parentID, let name, let explanation):
+                    guard let parent = references[parentID]?.reference else { aiDeclinedFiles.insert(key); continue }
+                    aiSuggestions[key] = AISuggestion(reference: DestinationReference(grantID: parent.grantID, relativeSubpath: name), explanation: "New folder “\(name)”: \(explanation)")
+                case .review(.providerUnavailable, let explanation):
+                    failure = explanation ?? "the provider could not be reached"
+                    continue
+                case .review:
+                    aiDeclinedFiles.insert(key)
+                    continue
+                }
+            }
+            guard let suggestion = aiSuggestions[key] else { continue }
+            let proposal = planner.plan(
+                file: file,
+                destination: suggestion.reference,
+                reasons: [MatchReason(predicate: AISuggestion.reasonPredicate, matched: true, explanation: suggestion.explanation)]
+            )
+            guard let destination = proposal.destinationURL,
+                  destination.deletingLastPathComponent().standardizedFileURL != file.url.deletingLastPathComponent().standardizedFileURL else { continue }
+            results.append(proposal)
+        }
+        return (results, failure)
+    }
+
+    private func aiDestinationOptions(_ destinations: [UUID: URL]) -> [(candidate: DestinationCandidate, reference: DestinationReference)] {
+        var options: [(candidate: DestinationCandidate, reference: DestinationReference)] = []
+        for grant in destinationGrants {
+            guard let root = destinations[grant.id] else { continue }
+            options.append((
+                DestinationCandidate(id: UUID(), displayName: grant.displayName, userDescription: grant.aiDescription),
+                DestinationReference(grantID: grant.id)
+            ))
+            let children = (try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey, .isPackageKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            )) ?? []
+            for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let values = try? child.resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
+                guard values?.isDirectory == true, values?.isPackage != true else { continue }
+                options.append((
+                    DestinationCandidate(id: UUID(), displayName: "\(grant.displayName)/\(child.lastPathComponent)"),
+                    DestinationReference(grantID: grant.id, relativeSubpath: child.lastPathComponent)
+                ))
+            }
+        }
+        return Array(options.prefix(99))
     }
 
     func reject(_ proposal: ProposedOperation) {
@@ -362,6 +478,29 @@ final class AppModel: ObservableObject {
     private static func loadRules(from url: URL) -> [OrganizationRule] {
         guard let data = try? Data(contentsOf: url), let rules = try? JSONDecoder().decode([OrganizationRule].self, from: data) else { return [] }
         return rules.sorted { $0.priority < $1.priority }
+    }
+}
+
+private struct AIFileKey: Hashable {
+    let path: String
+    let fingerprint: FileFingerprint
+
+    init(_ file: FileMetadata) {
+        path = file.url.standardizedFileURL.path
+        fingerprint = file.fingerprint
+    }
+}
+
+struct AISuggestion {
+    static let reasonPredicate = "aiSuggestion"
+
+    let reference: DestinationReference
+    let explanation: String
+}
+
+extension ProposedOperation {
+    var aiExplanation: String? {
+        reasons.first(where: { $0.predicate == AISuggestion.reasonPredicate })?.explanation
     }
 }
 

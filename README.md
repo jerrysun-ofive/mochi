@@ -20,6 +20,7 @@ Website: [trymochi.dev](https://trymochi.dev)
 - OpenAI-compatible adapters for OpenAI, DeepSeek, and Ollama
 - Gemini adapter
 - Mochi Pro provider-neutral gateway adapter
+- Vercel/Stripe Mochi Pro backend with Supabase entitlement and quota storage
 - local content minimization/redaction and decision cache
 - BYOK settings for TypeSafe Jev plus OpenAI, Gemini, DeepSeek, or local Ollama, with secrets stored in macOS Keychain
 - reproducible benchmark runner and tests
@@ -47,6 +48,8 @@ Reports include a dataset fingerprint, top-1 and abstention metrics, calibration
 Authorize a watched folder and a destination, then open **Quick Rules** to add common organizers in one click. Quick Rules create enabled deterministic rules and use destination subfolders such as `PDFs` or `Images`; matching files still enter Review before anything moves.
 
 BYOK credentials are configured under **Settings → AI & Privacy**. TypeSafe Jev is required for closed-set classification, together with OpenAI, Gemini, DeepSeek, or Ollama for generative fallback. Hosted AI classification remains review-only until the exact model version passes Mochi's benchmark safety gate.
+
+Mochi Pro server setup, required environment variables, Stripe events, and deployment commands are documented in [docs/MOCHI_PRO_BACKEND.md](docs/MOCHI_PRO_BACKEND.md).
 
 ## Architecture
 

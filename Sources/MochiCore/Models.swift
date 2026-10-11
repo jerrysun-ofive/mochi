@@ -146,6 +146,12 @@ public struct MatchReason: Codable, Hashable, Sendable {
     public let predicate: String
     public let matched: Bool
     public let explanation: String
+
+    public init(predicate: String, matched: Bool, explanation: String) {
+        self.predicate = predicate
+        self.matched = matched
+        self.explanation = explanation
+    }
 }
 
 public struct RuleEvaluation: Codable, Sendable {

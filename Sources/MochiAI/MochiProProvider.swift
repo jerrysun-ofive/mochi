@@ -9,16 +9,19 @@ public struct MochiProProvider: DestinationDecisionProvider, GenerativeAIProvide
 
     private let baseURL: URL
     private let accessToken: String
+    private let apiKey: String?
     private let session: URLSession
 
     public init(
         baseURL: URL,
         accessToken: String,
         registryVersion: String,
+        apiKey: String? = nil,
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.accessToken = accessToken
+        self.apiKey = apiKey
         self.session = session
         self.descriptor = .init(providerID: "mochi-pro", modelID: "automatic", modelVersion: registryVersion)
         self.capabilities = .init(supportsBatch: true, supportsModelPinning: false, reportsUsage: true)
@@ -46,6 +49,9 @@ public struct MochiProProvider: DestinationDecisionProvider, GenerativeAIProvide
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue(apiKey, forHTTPHeaderField: "apikey")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(descriptor.modelVersion, forHTTPHeaderField: "X-Mochi-Model-Registry")
         request.httpBody = try JSONEncoder.mochi.encode(payload)

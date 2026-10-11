@@ -46,25 +46,37 @@ public struct OperationPlanner: Sendable {
     }
 
     public func plan(file: FileMetadata, evaluation: RuleEvaluation) -> ProposedOperation {
-        var warnings: [PlanningWarning] = []
-        if !file.isRegularFile { warnings.append(.sourceNotRegularFile) }
-        if file.isSymbolicLink { warnings.append(.sourceIsSymbolicLink) }
-
         guard case .move(let reference) = evaluation.rule.action.disposition else {
-            return ProposedOperation(source: file, ruleID: evaluation.rule.id, destinationURL: nil, reasons: evaluation.reasons, warnings: warnings)
+            return ProposedOperation(source: file, ruleID: evaluation.rule.id, destinationURL: nil, reasons: evaluation.reasons, warnings: sourceWarnings(file))
         }
+        return plan(file: file, reference: reference, renameTemplate: evaluation.rule.action.renameTemplate, ruleID: evaluation.rule.id, reasons: evaluation.reasons)
+    }
+
+    public func plan(file: FileMetadata, destination reference: DestinationReference, reasons: [MatchReason]) -> ProposedOperation {
+        plan(file: file, reference: reference, renameTemplate: nil, ruleID: nil, reasons: reasons)
+    }
+
+    private func plan(file: FileMetadata, reference: DestinationReference, renameTemplate: String?, ruleID: UUID?, reasons: [MatchReason]) -> ProposedOperation {
+        var warnings = sourceWarnings(file)
         guard let root = resolveGrant(reference.grantID),
               let folder = PathSafety.containedURL(root: root, relativePath: reference.relativeSubpath) else {
             warnings.append(.destinationUnavailable)
-            return ProposedOperation(source: file, ruleID: evaluation.rule.id, destinationURL: nil, reasons: evaluation.reasons, warnings: warnings)
+            return ProposedOperation(source: file, ruleID: ruleID, destinationURL: nil, reasons: reasons, warnings: warnings)
         }
 
-        let name = renderedName(template: evaluation.rule.action.renameTemplate, metadata: file)
+        let name = renderedName(template: renameTemplate, metadata: file)
         let destination = folder.appendingPathComponent(name)
         if destination.filePath == file.url.filePath { warnings.append(.destinationUnavailable) }
         if !Self.sameVolume(file.url, folder) { warnings.append(.crossVolumeMoveUnsupported) }
         if FileManager.default.fileExists(atPath: destination.path) { warnings.append(.filenameConflict) }
-        return ProposedOperation(source: file, ruleID: evaluation.rule.id, destinationURL: destination, reasons: evaluation.reasons, warnings: warnings)
+        return ProposedOperation(source: file, ruleID: ruleID, destinationURL: destination, reasons: reasons, warnings: warnings)
+    }
+
+    private func sourceWarnings(_ file: FileMetadata) -> [PlanningWarning] {
+        var warnings: [PlanningWarning] = []
+        if !file.isRegularFile { warnings.append(.sourceNotRegularFile) }
+        if file.isSymbolicLink { warnings.append(.sourceIsSymbolicLink) }
+        return warnings
     }
 
     private func renderedName(template: String?, metadata: FileMetadata) -> String {

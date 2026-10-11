@@ -40,7 +40,9 @@ public actor HybridDecisionOrchestrator {
                 decision = try await decisionProvider.chooseDestination(request)
                 if let cache, let cacheKey { await cache.insert(decision, for: cacheKey) }
             } catch {
-                guard allowProviderFailover else { return .review(.providerUnavailable, explanation: String(describing: error)) }
+                guard allowProviderFailover else {
+                    return .review(.providerUnavailable, explanation: "\(decisionProvider.descriptor.providerID): \(error)")
+                }
                 return await useGenerativeFallback(request: request, decision: nil, parents: authorizedParentIDs, reason: .providerUnavailable)
             }
         }
@@ -86,7 +88,7 @@ public actor HybridDecisionOrchestrator {
                 return .review(reason, explanation: explanation)
             }
         } catch {
-            return .review(.providerUnavailable, explanation: String(describing: error))
+            return .review(.providerUnavailable, explanation: "\(generativeProvider.descriptor.providerID): \(error)")
         }
     }
 }

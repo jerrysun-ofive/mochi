@@ -35,6 +35,38 @@ protocol AICredentialStoring {
 
 extension KeychainCredentialStore: AICredentialStoring {}
 
+enum BYOKConfiguration {
+    static let jevAccount = "typesafe-jev-api-key"
+
+    static func providerAccount(for provider: GenerativeProviderChoice) -> String { "\(provider.rawValue)-api-key" }
+
+    /// Returns nil unless a Jev key and a usable generative provider are both saved.
+    static func makeOrchestrator(
+        defaults: UserDefaults = .standard,
+        credentials: any AICredentialStoring = KeychainCredentialStore()
+    ) -> HybridDecisionOrchestrator? {
+        guard let jevKey = try? credentials.load(account: jevAccount), !jevKey.isEmpty else { return nil }
+        let provider = defaults.string(forKey: "ai.generativeProvider").flatMap(GenerativeProviderChoice.init(rawValue:)) ?? .openAI
+        let savedModel = defaults.string(forKey: "ai.generativeModel")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let model = savedModel.isEmpty ? provider.defaultModel : savedModel
+        let generative: any GenerativeAIProvider
+        if provider == .ollama {
+            let endpoint = defaults.string(forKey: "ai.ollamaEndpoint").flatMap(URL.init(string:))
+                ?? URL(string: "http://127.0.0.1:11434/v1/chat/completions")!
+            generative = OpenAICompatibleGenerativeProvider.ollama(endpoint: endpoint, model: model)
+        } else {
+            guard let key = try? credentials.load(account: providerAccount(for: provider)), !key.isEmpty else { return nil }
+            switch provider {
+            case .openAI: generative = OpenAICompatibleGenerativeProvider.openAI(apiKey: key, model: model)
+            case .gemini: generative = GeminiGenerativeProvider(apiKey: key, model: model)
+            case .deepSeek: generative = OpenAICompatibleGenerativeProvider.deepSeek(apiKey: key, model: model)
+            case .ollama: return nil
+            }
+        }
+        return HybridDecisionOrchestrator(decisionProvider: TypeSafeJevDecisionProvider(apiKey: jevKey), generativeProvider: generative)
+    }
+}
+
 @MainActor
 final class AISettingsModel: ObservableObject {
     @Published var provider: GenerativeProviderChoice
@@ -48,7 +80,7 @@ final class AISettingsModel: ObservableObject {
 
     private let defaults: UserDefaults
     private let credentials: any AICredentialStoring
-    private static let jevAccount = "typesafe-jev-api-key"
+    private static let jevAccount = BYOKConfiguration.jevAccount
 
     init(defaults: UserDefaults = .standard, credentials: any AICredentialStoring = KeychainCredentialStore()) {
         self.defaults = defaults
@@ -111,7 +143,7 @@ final class AISettingsModel: ObservableObject {
         } catch { statusMessage = "Could not remove the key: \(error.localizedDescription)" }
     }
 
-    private var providerAccount: String { "\(provider.rawValue)-api-key" }
+    private var providerAccount: String { BYOKConfiguration.providerAccount(for: provider) }
 
     private func refreshCredentialStatus() {
         do {

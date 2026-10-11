@@ -22,7 +22,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MochiAppTests",
-            dependencies: ["MochiApp", "MochiCore"]
+            dependencies: ["MochiApp", "MochiCore", "MochiAI"]
         ),
     ]
 )

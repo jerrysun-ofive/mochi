@@ -839,6 +839,9 @@ private struct ProposalCard: View {
                     if let ruleName {
                         Label("Rule: \(ruleName)", systemImage: "list.bullet.rectangle")
                             .font(.caption).foregroundStyle(.secondary)
+                    } else if proposal.aiExplanation != nil {
+                        Label("AI suggestion", systemImage: "sparkles")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
@@ -850,6 +853,12 @@ private struct ProposalCard: View {
             }
 
             MoveRoute(from: proposal.source.url.deletingLastPathComponent(), to: proposal.destinationURL?.deletingLastPathComponent())
+
+            if let explanation = proposal.aiExplanation, !explanation.isEmpty {
+                Text(explanation)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if let destination = proposal.destinationURL, destination.lastPathComponent != proposal.source.filename {
                 Label("Will be saved as “\(destination.lastPathComponent)”", systemImage: "pencil")
@@ -1120,7 +1129,7 @@ private struct ProfileView: View {
                 Text(account.totalFilesSorted == 1 ? "file sorted with Mochi" : "files sorted with Mochi")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("Free plan")
+                Text(account.isPro ? "Pro plan" : "Free plan")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(Capsule().fill(Color.accentColor.opacity(0.15)))
@@ -1146,6 +1155,27 @@ private struct ProfileView: View {
             }
 
             usageCard
+
+            SettingsCard(title: "Mochi Pro") {
+                if account.isPro {
+                    Label("Your subscription is active", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Text("\(account.proEntitlement.requestsUsed.formatted()) of \(account.proEntitlement.requestLimit.formatted()) hosted AI requests used this month.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Manage Subscription") { Task { await account.manageSubscription() } }
+                        Button("Refresh Plan") { Task { await account.refreshPlan() } }
+                    }
+                } else {
+                    Text("Hosted Jev + DeepSeek classification without managing your own API keys. AI suggestions still use Mochi’s local validation and review flow.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Upgrade to Mochi Pro") { Task { await account.upgradeToPro() } }
+                            .buttonStyle(.borderedProminent)
+                        Button("Refresh Plan") { Task { await account.refreshPlan() } }
+                    }
+                }
+            }
 
             SettingsCard(title: "Display name") {
                 HStack {
